@@ -1,8 +1,6 @@
 import json
 import os
 import chainlit as cl
-from fastmcp import Client
-from fastmcp.client.transports import SSETransport
 import logging
 import base64
 from fpdf import FPDF
@@ -10,17 +8,18 @@ from docx import Document
 from docx2pdf import convert
 from typing import List
 import tempfile
+import httpx
 
 # MCP server URLs per tool
 TOOL_ENDPOINTS = {
-    "DML Requests": "http://localhost:8880/sse",
-    "Alerts Info": "http://localhost:8881/sse",
-    "Message Spec": "http://localhost:8882/sse",
+    "DML Requests": "http://localhost:8880/handle_request",
+    "Alerts Info": "http://localhost:8881/handle_request",
+    "Message Spec": "http://localhost:8882/handle_request",
 }
 
 
 # ---------------------------
-# CALL TOOL USING FASTMCP CLIENT
+# CALL TOOL USING HTTPX (no fastmcp)
 # ---------------------------
 async def call_mcp_tool(tool_name, user_query, chat_history):
     tool_url = TOOL_ENDPOINTS.get(tool_name)
@@ -28,46 +27,36 @@ async def call_mcp_tool(tool_name, user_query, chat_history):
         return f"❌ Unknown tool selected: {tool_name}"
 
     try:
-        async with Client(SSETransport(tool_url)) as client:
+        async with httpx.AsyncClient() as client:
             payload = {
                 "user_query": user_query,
                 "chat_history": chat_history,
                 "user_id": "demo-user"
             }
-            result = await client.call_tool("handle_request", payload)
+            response = await client.post(tool_url, json=payload, timeout=30)
+            response.raise_for_status()
+
+            result = response.json()
 
             logging.info(f"Result from MCP =========== {result}")
 
-            # Check if result is a list and has content
-            if isinstance(result, list) and len(result) > 0:
-                first_item = result[0]
+            if result.get("type") == "file":
+                file_content_base64 = result["content"].get("file_content")
+                file_name = result["content"].get("file_name")
+                mime = result["content"].get("mime")
 
-                # If the first item contains 'text' (JSON string)
-                if hasattr(first_item, 'text'):
-                    # Parse the JSON string
-                    response_data = json.loads(first_item.text)
+                if file_content_base64 and file_name:
+                    file_content = base64.b64decode(file_content_base64)
+                    return cl.File(
+                        name=file_name,
+                        content=file_content,
+                        mime=mime
+                    )
+                else:
+                    return "⚠️ File content or file name missing in the response."
 
-                    # Extract 'file_content' and 'file_name'
-                    if response_data.get("type") == "file":
-                        file_content_base64 = response_data["content"].get("file_content")
-                        file_name = response_data["content"].get("file_name")
-                        mime = response_data["content"].get("mime")
-
-                        if file_content_base64 and file_name:
-                            # Decode the base64 encoded content
-                            file_content = base64.b64decode(file_content_base64)
-
-                            # Return the file as a Chainlit file object
-                            return cl.File(
-                                name=file_name,
-                                content=file_content,
-                                mime=mime  # You can adjust the MIME type as needed
-                            )
-                        else:
-                            return "⚠️ File content or file name missing in the response."
-                    elif response_data.get("type") == "text":
-                        response_text = response_data["response"]
-                        return response_text
+            elif result.get("type") == "text":
+                return result.get("response")
 
             return "⚠️ Unexpected MCP server response."
 
