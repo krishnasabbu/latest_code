@@ -1,4 +1,5 @@
-from fastmcp import FastMCP
+import uvicorn
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from llm_client import LLMClient
@@ -20,7 +21,8 @@ asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 # ---------------------------
 # CONFIGURATION
 # ---------------------------
-mcp = FastMCP("Basic MCP Server")
+app = FastAPI()
+# mcp = FastMCP("Basic MCP Server")
 llm = LLMClient()  # Using Together AI client, model is configured internally
 
 
@@ -41,6 +43,13 @@ class MCPInput(BaseModel):
 class MCPOutput(BaseModel):
     response: str
     context: Optional[Dict[str, Any]] = {}
+
+
+# Define a Pydantic model for the request body
+class RequestData(BaseModel):
+    user_query: str
+    chat_history: list
+    user_id: str
 
 
 # ---------------------------
@@ -185,15 +194,14 @@ def generate_game_plan(jira_ids):
 # ---------------------------
 # MAIN MCP TOOL (FOR SSE)
 # ---------------------------
-@mcp.tool()
-async def handle_request(user_query: str, chat_history: Optional[List[Dict[str, str]]] = None,
-                         user_id: Optional[str] = None):
-    logging.info(f"user_query ===== {user_query}")
-    logging.info(f"chat_history ===== {chat_history}")
-    logging.info(f"user_id ===== {user_id}")
+@app.post("/handle_request")
+async def handle_request(request_data: RequestData):
+    logging.info(f"user_query ===== {request_data.user_query}")
+    logging.info(f"chat_history ===== {request_data.chat_history}")
+    logging.info(f"user_id ===== {request_data.user_id}")
 
-    user_query = user_query.strip()
-    chat_history = chat_history or []
+    user_query = request_data.user_query.strip()
+    chat_history = request_data.chat_history or []
 
     if not chat_history:
         return "👋 Hi! Please provide a JIRA Story ID or describe the DML change you'd like to make."
@@ -302,4 +310,4 @@ async def handle_request(user_query: str, chat_history: Optional[List[Dict[str, 
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", port=8880)
+    uvicorn.run(app, port=8880)
