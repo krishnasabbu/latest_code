@@ -57,7 +57,9 @@ class RequestData(BaseModel):
 # ---------------------------
 def fetch_jira_description(jira_id: str) -> str:
     # Replace this with real JIRA API call
-    return f"Please delete the record in t_request table as request_id is 1"
+
+    return (f"Please delete the record in t_request table as request_id is 1 \n "
+            f"Please delete the record in t_request table as request_id is 1")
 
 
 # ---------------------------
@@ -78,24 +80,13 @@ def extract_valid_json(llm_response: str) -> dict:
 def generate_sql_query(jira_id):
     description = fetch_jira_description(jira_id)
 
-    prompt = f"""
-        You are a helpful assistant that extracts information from user input to perform a DML operation.
-
-        Input: {description}
-
-        Respond in JSON format:
-        {{
-            "action": "UPDATE or DELETE",
-            "table": "table_name",
-            "set": "UPDATE Fields",
-            "condition": "SQL WHERE clause"
-        }}
-        """
+    prompt = get_sql_prompt(description)
 
     llm_response = llm.query(prompt)
 
     try:
         dml_info = extract_valid_json(llm_response)
+        logging.info(f"dml info ========== {dml_info}")
         return generate_sql(dml_info)
     except Exception as e:
         return f"❌ Failed to parse LLM output: {e}\n\nRaw LLM response: {llm_response}"
@@ -127,8 +118,24 @@ def generate_query(table_details):
     return query
 
 
-def generate_sql(dml_details):
-    sql_text = f"{dml_details['action']} FROM {dml_details['table']} WHERE {dml_details['condition']};"
+def generate_sql(dml_details_list):
+    # Initialize empty SQL text
+    sql_text = ""
+
+    # Iterate over list of DML instructions
+    for dml_details in dml_details_list:
+        action = dml_details.get('action')
+        table = dml_details.get('table')
+        condition = dml_details.get('condition')
+        set_clause = dml_details.get('set')
+
+        if action == "UPDATE":
+            sql_text += f"UPDATE {table} SET {set_clause} WHERE {condition};\n"
+        elif action == "DELETE":
+            sql_text += f"DELETE FROM {table} WHERE {condition};\n"
+        else:
+            # Unknown action, you can raise error or ignore
+            continue
 
     # Save to temporary file
     file_path = f"/tmp/generated_query.sql"
@@ -191,6 +198,45 @@ def generate_game_plan(jira_ids):
     return update_game_plan("game_plan.docx", jira_ids)
 
 
+def get_sql_prompt(description):
+    return f"""
+            You are a helpful assistant that extracts database DML operations from a user's description.
+    
+            Instructions:
+            - Read the description carefully.
+            - Identify each DML operation (UPDATE or DELETE) mentioned.
+            - Extract the following information for each operation:
+              - "action" → Either "UPDATE" or "DELETE"
+              - "table" → Target table name
+              - "set" → Fields and values to be updated (for UPDATE only, null for DELETE)
+              - "condition" → SQL WHERE condition
+            
+            Output Format:
+            - Always return a **JSON list**.
+            - If multiple queries exist, return multiple items in the list.
+            - If no UPDATE fields exist for DELETE, put "set" as null.
+            
+            Example Output:
+            [
+              {{
+                "action": "UPDATE",
+                "table": "employees",
+                "set": "salary = 60000, department = 'HR'",
+                "condition": "employee_id = 101"
+              }},
+              {{
+                "action": "DELETE",
+                "table": "departments",
+                "set": null,
+                "condition": "department_id = 5"
+              }}
+            ]
+            
+            Input Description:
+            {description}
+            """
+
+
 # ---------------------------
 # MAIN MCP TOOL (FOR SSE)
 # ---------------------------
@@ -224,15 +270,7 @@ async def handle_request(request_data: RequestData):
                 
                 You are a helpful assistant that extracts information from user input to perform a DML (Data Manipulation Language) operation.
                 
-                **Input:** {user_query}
-                
-                **Respond in JSON format:**
-                {{
-                    "action": "UPDATE or DELETE",   // Action type
-                    "table": "table_name",          // Table name
-                    "set": "UPDATE Fields",
-                    "condition": "SQL WHERE clause" // Condition for SQL WHERE clause
-                }}
+                {get_sql_prompt(user_query)}
                 
                 If no DML information is found, proceed to **Step 2**.
                 
@@ -277,7 +315,9 @@ async def handle_request(request_data: RequestData):
             logging.info(response_info.get("action"))
             logging.info(response_info.get("intent"))
 
-            if response_info.get("action"):
+            response_info_string = json.dumps(response_info)
+
+            if "action" in response_info_string:
                 return generate_sql(response_info)
 
             if response_info.get("intent"):
