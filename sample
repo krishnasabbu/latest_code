@@ -34,3 +34,5 @@ Tone:
 - Be polite, clear, and guide the user step-by-step.
 - Always maintain the JSON structure for easy client-side parsing.
 """
+content="🐞 **Exception Finder**\n\nIdentified 3 bugs in your logs."
+
