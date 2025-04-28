@@ -36,3 +36,10 @@ Tone:
 """
 content="🐞 **Exception Finder**\n\nIdentified 3 bugs in your logs."
 
+import chainlit as cl
+
+@cl.on_chat_start
+async def start():
+    await cl.Message(
+        content="📋 **Log Validation**\n\nPlease upload your logs or paste them for validation."
+    ).send()
