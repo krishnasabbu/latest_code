@@ -1,24 +1,41 @@
-import xml.etree.ElementTree as ET
+from lxml import etree
 import json
 
 
+def get_clean_seg_text(seg_el):
+    text_parts = []
+    for child in seg_el.iter():
+        if child.tag == 'seg':
+            if child.text:
+                text_parts.append(child.text)
+        elif child.tag not in {'ph', 'bpt', 'ept', 'it'}:
+            if child.text:
+                text_parts.append(child.text)
+        if child.tail:
+            text_parts.append(child.tail)
+    return ''.join(text_parts).strip()
+
+
 def parse_translation_units(xml_file):
-    tree = ET.parse(xml_file)
-    root = tree.getroot()
+    with open(xml_file, 'rb') as f:
+        parser = etree.XMLParser(recover=True)
+        tree = etree.parse(f, parser)
+        root = tree.getroot()
 
     translation_map = {}
 
-    for tu in root.findall(".//tu"):
-        srclang = tu.attrib.get("srclang", "EN-US")
-        tuvs = tu.findall("tuv")
+    for tu in root.xpath(".//tu"):
+        srclang = tu.get("srclang", "EN-US")
+        tuvs = tu.xpath("tuv")
 
         source_text = None
         target_text = None
         target_lang = None
 
         for tuv in tuvs:
-            lang = tuv.attrib.get("{http://www.w3.org/XML/1998/namespace}lang")
-            seg = tuv.find("seg").text.strip() if tuv.find("seg") is not None else ""
+            lang = tuv.get("{http://www.w3.org/XML/1998/namespace}lang")
+            seg_el = tuv.find("seg")
+            seg = get_clean_seg_text(seg_el) if seg_el is not None else ""
 
             if lang == srclang:
                 source_text = seg
@@ -35,7 +52,6 @@ def parse_translation_units(xml_file):
     return translation_map
 
 
-# Example usage:
-xml_path = "sample.xml"
-result = parse_translation_units(xml_path)
+# Usage
+result = parse_translation_units("sample.xml")
 print(json.dumps(result, indent=2, ensure_ascii=False))
