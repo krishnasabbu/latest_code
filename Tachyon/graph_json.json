@@ -1,0 +1,62 @@
+# -------------------------------------------------------------------
+# Example Graph JSON (with conditional edges)
+# -------------------------------------------------------------------
+
+example_graph = {
+    "nodes": [
+        {
+            "id": "n1",
+            "type": "service",
+            "data": {
+                "url": "https://httpbin.org/post",
+                "method": "POST",
+                "request": {
+                    "customerInfo": {
+                        "customerId": "{input.company.name}",
+                        "country": "{input.company.address.country}"
+                    }
+                },
+                "mappings": []
+            }
+        },
+        {
+            "id": "n2",
+            "type": "decision",
+            "data": {
+                "script": """
+# Decision logic example
+country = state['n1']['json']['customerInfo']['country']
+if country == 'United States':
+    state['region'] = 'US'
+else:
+    state['region'] = 'Other'
+"""
+            }
+        },
+        {
+            "id": "n3",
+            "type": "service",
+            "data": {
+                "url": "https://httpbin.org/post",
+                "method": "POST",
+                "request": {"finalRegion": "{state.region}", "info": "Processed for US"},
+                "mappings": []
+            }
+        },
+        {
+            "id": "n4",
+            "type": "service",
+            "data": {
+                "url": "https://httpbin.org/post",
+                "method": "POST",
+                "request": {"finalRegion": "{state.region}", "info": "Processed for Non-US"},
+                "mappings": []
+            }
+        }
+    ],
+    "edges": [
+        {"source": "n1", "target": "n2"},
+        {"source": "n2", "target": "n3", "condition": "state['region'] == 'US'"},
+        {"source": "n2", "target": "n4", "condition": "state['region'] != 'US'"}
+    ]
+}
