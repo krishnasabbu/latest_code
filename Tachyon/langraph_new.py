@@ -1,14 +1,15 @@
-from fastapi import FastAPI, Body
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+from langgraph.graph import StateGraph, END
 import requests
-from simpleeval import simple_eval
 import uvicorn
+from simpleeval import simple_eval
 
-# --------------------------
+# -------------------------------------------------------------------
 # FastAPI setup
-# --------------------------
+# -------------------------------------------------------------------
 
 app = FastAPI(title="Dynamic JSON Service Node Executor")
 
@@ -20,101 +21,107 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------------------------
-# Mapping Engine
-# --------------------------
+# -------------------------------------------------------------------
+# Node Execution Factory
+# -------------------------------------------------------------------
 
-def apply_mappings(state: dict, mappings: list):
+def make_service_node(node_data: Dict[str, Any]):
     """
-    Apply mappings to produce a node request or modify response
+    Service Node executes an HTTP request.
+    Supports multiple mappings from previous node responses.
     """
-    payload = {}
-    for mapping in mappings:
-        src_path = mapping["source"].split(".")
-        value = state
-        for key in src_path:
-            value = value.get(key)
+    url = node_data["data"]["url"]
+    method = node_data["data"].get("method", "POST").upper()
+    request_template = node_data["data"].get("request", {})
+    mappings = node_data["data"].get("mappings", [])
+
+    def run_fn(state: Dict[str, Any]):
+        # Apply all mappings
+        payload = request_template.copy()
+        for m in mappings:
+            src_path = m["source"].split(".")
+            value = state
+            for k in src_path:
+                value = value.get(k)
+                if value is None:
+                    break
             if value is None:
-                break
-        if value is None:
-            continue
-        transform = mapping.get("transform")
-        if transform == "upper":
-            value = str(value).upper()
-        elif transform == "lower":
-            value = str(value).lower()
-        elif transform == "strip":
-            value = str(value).strip()
-        payload[mapping["target"]] = value
-    return payload
+                continue
+            transform = m.get("transform")
+            if transform == "upper":
+                value = str(value).upper()
+            elif transform == "lower":
+                value = str(value).lower()
+            elif transform == "strip":
+                value = str(value).strip()
+            payload[m["target"]] = value
 
-# --------------------------
-# Node Execution
-# --------------------------
+        # Execute HTTP request
+        try:
+            resp = requests.request(method, url, json=payload, timeout=10)
+            data = resp.json() if resp.ok else {"error": resp.text}
+        except Exception as e:
+            data = {"error": str(e)}
+        return data
 
-def execute_node(node: dict, state: dict):
-    """
-    Execute a single service node.
-    - Apply request mappings from previous node responses
-    - Send JSON payload to the service
-    - Store JSON response
-    """
-    # Start with base request
-    payload = node.get("request", {}).copy()
-    # Apply mappings
-    mappings = node.get("mappings", [])
-    mapped_payload = apply_mappings(state, mappings)
-    payload.update(mapped_payload)
+    return run_fn
 
-    # Execute HTTP request
-    url = node["url"]
-    method = node.get("method", "POST").upper()
-    try:
-        resp = requests.request(method, url, json=payload, timeout=10)
-        data = resp.json() if resp.ok else {"error": resp.text}
-    except Exception as e:
-        data = {"error": str(e)}
-    return data
+NODE_FACTORY = {
+    "service": make_service_node
+}
 
-# --------------------------
-# Workflow Runner
-# --------------------------
+# -------------------------------------------------------------------
+# Graph Builder
+# -------------------------------------------------------------------
 
-def run_workflow(graph_json: dict, initial_input: dict):
-    state = {"input": initial_input}
-    nodes_by_id = {n["id"]: n for n in graph_json["nodes"]}
-    executed_nodes = set()
-    current_node_id = graph_json["nodes"][0]["id"]
+def build_graph_from_json(graph_json: Dict[str, Any]):
+    g = StateGraph(dict)
 
-    while current_node_id:
-        node = nodes_by_id[current_node_id]
-        # Execute node
-        response = execute_node(node, state)
-        state[node["id"]] = response
-        executed_nodes.add(current_node_id)
+    # Step 1: Add nodes
+    for node in graph_json["nodes"]:
+        ntype = node["type"]
+        if ntype not in NODE_FACTORY:
+            raise ValueError(f"Unknown node type: {ntype}")
+        func = NODE_FACTORY[ntype](node)
+        g.add_node(node["id"], func)
 
-        # Determine next node based on edges and conditions
-        edges = [e for e in graph_json["edges"] if e["source"] == current_node_id]
-        next_node_id = None
-        for e in edges:
-            cond = e.get("condition")
-            if cond:
-                try:
-                    if simple_eval(cond, names=state):
-                        next_node_id = e["target"]
-                        break
-                except Exception as ex:
-                    print("Condition eval error:", ex)
-            else:
-                next_node_id = e["target"]
-                break
-        current_node_id = next_node_id
+    # Step 2: Add edges (support multiple conditional edges per node)
+    edges_by_source = {}
+    for e in graph_json["edges"]:
+        edges_by_source.setdefault(e["source"], []).append(e)
 
-    return state
+    for source, edges in edges_by_source.items():
+        # If there is any condition on the edges
+        if any("condition" in e for e in edges):
+            def conditional_fn(state, edges=edges):
+                for edge in edges:
+                    cond = edge.get("condition")
+                    if cond:
+                        try:
+                            if simple_eval(cond, names=state):
+                                return edge["target"]
+                        except Exception as ex:
+                            print("Condition eval error:", ex)
+                # fallback: if an edge without condition exists
+                for e in edges:
+                    if "condition" not in e:
+                        return e["target"]
+                return None
+            g.add_conditional_edges(source, conditional_fn)
+        else:
+            for e in edges:
+                g.add_edge(e["source"], e["target"])
 
-# --------------------------
+    # Step 3: Entry/Exit
+    entry = graph_json["nodes"][0]["id"]
+    g.set_entry_point(entry)
+    g.add_edge(graph_json["nodes"][-1]["id"], END)
+
+    return g.compile()
+
+# -------------------------------------------------------------------
 # FastAPI Models
-# --------------------------
+# -------------------------------------------------------------------
 
 class ExecuteRequest(BaseModel):
     graph: Dict[str, Any]
@@ -123,15 +130,17 @@ class ExecuteRequest(BaseModel):
 class ExecuteResponse(BaseModel):
     status: str
     result: Dict[str, Any]
+    logs: Optional[List[str]] = None
 
-# --------------------------
-# API Endpoints
-# --------------------------
+# -------------------------------------------------------------------
+# API Endpoint
+# -------------------------------------------------------------------
 
 @app.post("/execute", response_model=ExecuteResponse)
 def execute_workflow(req: ExecuteRequest):
     try:
-        result = run_workflow(req.graph, req.inputs)
+        graph = build_graph_from_json(req.graph)
+        result = graph.invoke(req.inputs)
         return ExecuteResponse(status="success", result=result)
     except Exception as e:
         return ExecuteResponse(status="error", result={"error": str(e)})
@@ -140,9 +149,50 @@ def execute_workflow(req: ExecuteRequest):
 def root():
     return {"message": "Dynamic JSON Service Node Executor running"}
 
-# --------------------------
-# Run server
-# --------------------------
+# -------------------------------------------------------------------
+# Example JSON Workflow
+# -------------------------------------------------------------------
 
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+example_flow = {
+    "nodes": [
+        {
+            "id": "n1",
+            "type": "service",
+            "data": {
+                "url": "https://httpbin.org/post",
+                "method": "POST",
+                "request": {"msg": "{input.message}"},
+                "mappings": []
+            }
+        },
+        {
+            "id": "n2",
+            "type": "service",
+            "data": {
+                "url": "https://httpbin.org/post",
+                "method": "POST",
+                "request": {},
+                "mappings": [
+                    {"source": "n1.json.msg", "target": "upper_msg", "transform": "upper"},
+                    {"source": "n1.json.msg", "target": "lower_msg", "transform": "lower"}
+                ]
+            }
+        },
+        {
+            "id": "n3",
+            "type": "service",
+            "data": {
+                "url": "https://httpbin.org/post",
+                "method": "POST",
+                "request": {},
+                "mappings": [
+                    {"source": "n1.json.msg", "target": "original_msg"}
+                ]
+            }
+        }
+    ],
+    "edges": [
+        {"source": "n1", "target": "n2", "condition": "input.message.startswith('H')"},
+        {"source": "n1", "target": "n3", "condition": "input.message.startswith('B')"}
+    ]
+}
