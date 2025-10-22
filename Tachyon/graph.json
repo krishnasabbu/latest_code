@@ -1,0 +1,19 @@
+{
+  "graph": {
+    "nodes": [
+      {"id": "n1", "type": "llm", "data": {"prompt": "Analyze sentiment: {text}"}},
+      {"id": "n2", "type": "api", "data": {"url": "https://api.positive.com"}},
+      {"id": "n3", "type": "api", "data": {"url": "https://api.negative.com"}},
+      {"id": "n4", "type": "manual", "data": {"message": "Awaiting approval"}}
+    ],
+    "edges": [
+      {"source": "n1", "target": "n2", "condition": "sentiment == 'positive'"},
+      {"source": "n1", "target": "n3", "condition": "sentiment == 'negative'"},
+      {"source": "n2", "target": "n4"},
+      {"source": "n3", "target": "n4"}
+    ]
+  },
+  "inputs": {
+    "text": "I love playing cricket so much!"
+  }
+}
