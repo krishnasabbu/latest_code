@@ -1,0 +1,33 @@
+{
+  "nodes": [
+    {
+      "id": "n1",
+      "url": "https://httpbin.org/post",
+      "method": "POST",
+      "request": {"msg": "{input.message}"},
+      "mappings": []
+    },
+    {
+      "id": "n2",
+      "url": "https://httpbin.org/post",
+      "method": "POST",
+      "request": {},
+      "mappings": [
+        { "source": "n1.json.msg", "target": "message_upper", "transform": "upper" }
+      ]
+    },
+    {
+      "id": "n3",
+      "url": "https://httpbin.org/post",
+      "method": "POST",
+      "request": {},
+      "mappings": [
+        { "source": "n1.json.msg", "target": "message_lower", "transform": "lower" }
+      ]
+    }
+  ],
+  "edges": [
+    { "source": "n1", "target": "n2", "condition": "input.message.startswith('H')" },
+    { "source": "n1", "target": "n3", "condition": "input.message.startswith('B')" }
+  ]
+}
