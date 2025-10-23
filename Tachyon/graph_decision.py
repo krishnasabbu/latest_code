@@ -42,6 +42,43 @@ def deep_get(data: Dict[str, Any], path: str):
             return None
     return data
 
+import re
+from typing import Any, Dict
+
+def deep_get(data: Dict[str, Any], path: str) -> Any:
+    """
+    Safely get a deeply nested value from a dict or list using dot and bracket notation.
+    Example: deep_get(obj, "company.address[0].country")
+    """
+    if not path:
+        return data
+
+    # Split by dots but keep bracket parts intact
+    parts = re.split(r'\.(?![^\[]*\])', path)
+
+    for part in parts:
+        # Extract possible list indices, e.g. address[0][1]
+        match = re.findall(r'([^\[\]]+)|\[(\d+)\]', part)
+        for key, index in match:
+            if key:
+                if isinstance(data, dict):
+                    data = data.get(key)
+                else:
+                    return None
+            elif index is not None:
+                if isinstance(data, list):
+                    try:
+                        data = data[int(index)]
+                    except (IndexError, ValueError):
+                        return None
+                else:
+                    return None
+            if data is None:
+                return None
+
+    return data
+
+
 
 def render_template(obj: Any, context: Dict[str, Any]):
     if isinstance(obj, str):
