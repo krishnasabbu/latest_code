@@ -27,37 +27,12 @@ app.add_middleware(
 # Utility: Recursive lookup and template substitution
 # -------------------------------------------------------------------
 
-def deep_get(data: Dict[str, Any], path: str):
-    keys = path.split(".")
-    for key in keys:
-        if isinstance(data, dict):
-            data = data.get(key)
-        elif isinstance(data, list):
-            try:
-                idx = int(key)
-                data = data[idx]
-            except Exception:
-                return None
-        else:
-            return None
-    return data
-
-import re
-from typing import Any, Dict
-
 def deep_get(data: Dict[str, Any], path: str) -> Any:
-    """
-    Safely get a deeply nested value from a dict or list using dot and bracket notation.
-    Example: deep_get(obj, "company.address[0].country")
-    """
+    """Get deeply nested dict/list value using dot + bracket notation."""
     if not path:
         return data
-
-    # Split by dots but keep bracket parts intact
     parts = re.split(r'\.(?![^\[]*\])', path)
-
     for part in parts:
-        # Extract possible list indices, e.g. address[0][1]
         match = re.findall(r'([^\[\]]+)|\[(\d+)\]', part)
         for key, index in match:
             if key:
@@ -75,12 +50,11 @@ def deep_get(data: Dict[str, Any], path: str) -> Any:
                     return None
             if data is None:
                 return None
-
     return data
 
 
-
 def render_template(obj: Any, context: Dict[str, Any]):
+    """Replace placeholders like {input.company.name} recursively."""
     if isinstance(obj, str):
         matches = re.findall(r"\{([^{}]+)\}", obj)
         for m in matches:
@@ -93,6 +67,7 @@ def render_template(obj: Any, context: Dict[str, Any]):
     elif isinstance(obj, list):
         return [render_template(v, context) for v in obj]
     return obj
+
 
 # -------------------------------------------------------------------
 # Node: Service Node
@@ -107,18 +82,20 @@ def make_service_node(node_data: Dict[str, Any]):
     def run_fn(state: Dict[str, Any]):
         payload = render_template(copy.deepcopy(request_template), state)
 
-        # Apply explicit mappings
+        # Apply explicit mappings (multiple supported)
         for m in mappings:
-            val = deep_get(state, m["source"])
+            source = m.get("source")
+            target = m.get("target")
+            transform = m.get("transform")
+            val = deep_get(state, source)
             if val is not None:
-                if transform := m.get("transform"):
-                    if transform == "upper":
-                        val = str(val).upper()
-                    elif transform == "lower":
-                        val = str(val).lower()
-                    elif transform == "strip":
-                        val = str(val).strip()
-                payload[m["target"]] = val
+                if transform == "upper":
+                    val = str(val).upper()
+                elif transform == "lower":
+                    val = str(val).lower()
+                elif transform == "strip":
+                    val = str(val).strip()
+                payload[target] = val
 
         try:
             resp = requests.request(method, url, json=payload, timeout=10)
@@ -126,10 +103,15 @@ def make_service_node(node_data: Dict[str, Any]):
         except Exception as e:
             data = {"error": str(e)}
 
-        state[node_data["id"]] = data
+        # Store response in state
+        state[node_data["id"]] = {
+            "request": payload,
+            "response": data
+        }
         return state
 
     return run_fn
+
 
 # -------------------------------------------------------------------
 # Node: Drools / Decision Node
@@ -143,19 +125,19 @@ def make_decision_node(node_data: Dict[str, Any]):
     def run_fn(state: Dict[str, Any]):
         new_state = state.copy()
 
-        # Rule-based evaluation
+        # Rule-based evaluation (multiple conditions)
         if rules:
             for rule in rules:
                 cond = rule.get("condition")
                 try:
-                    if simple_eval(cond, names={"state": new_state}):
+                    if simple_eval(cond, names={"state": new_state, "input": new_state.get("input", {})}):
                         action = rule.get("action", {})
                         if isinstance(action, dict):
                             new_state.update(action)
                 except Exception as e:
                     print(f"[DecisionNode-Rules] Condition error: {e}")
 
-        # Script mode (multi-line Python)
+        # Script mode (Python block)
         if script:
             try:
                 local_env = {"state": new_state}
@@ -168,6 +150,7 @@ def make_decision_node(node_data: Dict[str, Any]):
 
     return run_fn
 
+
 # -------------------------------------------------------------------
 # Node Factory
 # -------------------------------------------------------------------
@@ -177,6 +160,7 @@ NODE_FACTORY = {
     "decision": make_decision_node,
 }
 
+
 # -------------------------------------------------------------------
 # Graph Builder
 # -------------------------------------------------------------------
@@ -184,11 +168,13 @@ NODE_FACTORY = {
 def build_graph_from_json(graph_json: Dict[str, Any]):
     g = StateGraph(dict)
 
+    # Register nodes
     for node in graph_json["nodes"]:
         ntype = node["type"]
         func = NODE_FACTORY[ntype](node)
         g.add_node(node["id"], func)
 
+    # Handle edges (with multiple conditional edges per node)
     edges_by_source = {}
     for e in graph_json["edges"]:
         edges_by_source.setdefault(e["source"], []).append(e)
@@ -198,12 +184,14 @@ def build_graph_from_json(graph_json: Dict[str, Any]):
             def conditional_fn(state, edges=edges):
                 for edge in edges:
                     cond = edge.get("condition")
-                    if cond:
-                        try:
-                            if simple_eval(cond, names={"state": state}):
-                                return edge["target"]
-                        except Exception as ex:
-                            print("Condition eval error:", ex)
+                    if not cond:
+                        continue
+                    try:
+                        if simple_eval(cond, names={"state": state, "input": state.get("input", {})}):
+                            return edge["target"]
+                    except Exception as ex:
+                        print("Condition eval error:", ex)
+                # fallback (no match)
                 for e in edges:
                     if "condition" not in e:
                         return e["target"]
@@ -213,11 +201,12 @@ def build_graph_from_json(graph_json: Dict[str, Any]):
             for e in edges:
                 g.add_edge(e["source"], e["target"])
 
+    # Entry and end
     entry = graph_json["nodes"][0]["id"]
     g.set_entry_point(entry)
     g.add_edge(graph_json["nodes"][-1]["id"], END)
-
     return g.compile()
+
 
 # -------------------------------------------------------------------
 # FastAPI Models
@@ -231,6 +220,7 @@ class ExecuteResponse(BaseModel):
     status: str
     result: Dict[str, Any]
     logs: Optional[List[str]] = None
+
 
 # -------------------------------------------------------------------
 # API Endpoint
@@ -246,9 +236,11 @@ def execute_workflow(req: ExecuteRequest):
     except Exception as e:
         return ExecuteResponse(status="error", result={"error": str(e)})
 
+
 @app.get("/")
 def root():
     return {"message": "Dynamic JSON + Drools Executor running"}
+
 
 # -------------------------------------------------------------------
 # Example Graph JSON
@@ -265,23 +257,28 @@ example_graph = {
                 "request": {
                     "customerInfo": {
                         "customerId": "{input.company.name}",
-                        "country": "{input.company.address.country}"
+                        "country": "{input.company.address[0].country}"
                     }
                 },
-                "mappings": []
+                "mappings": [
+                    {"source": "input.role", "target": "customerInfo.role", "transform": "upper"}
+                ]
             }
         },
         {
             "id": "n2",
             "type": "decision",
             "data": {
-                "script": """
-# Example: check country from previous node
-if state['n1']['json']['customerInfo']['country'] == 'United States':
-    state['region'] = 'US'
-else:
-    state['region'] = 'Other'
-"""
+                "rules": [
+                    {
+                        "condition": "state['n1']['response']['json']['customerInfo']['country'] == 'United States'",
+                        "action": {"region": "US"}
+                    },
+                    {
+                        "condition": "state['n1']['response']['json']['customerInfo']['country'] != 'United States'",
+                        "action": {"region": "Other"}
+                    }
+                ]
             }
         },
         {
@@ -297,7 +294,8 @@ else:
     ],
     "edges": [
         {"source": "n1", "target": "n2"},
-        {"source": "n2", "target": "n3"}
+        {"source": "n2", "target": "n3", "condition": "state['region'] == 'US'"},
+        {"source": "n2", "target": "n3", "condition": "state['region'] == 'Other'"}
     ]
 }
 
